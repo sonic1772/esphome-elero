@@ -99,6 +99,7 @@ class EleroCover : public cover::Cover, public Component {
   uint32_t lamella_duration_{0};
   uint32_t end_reached_time_{0};
   uint32_t force_poll_at_{0};
+  uint8_t force_poll_count_{0};
   std::queue<uint8_t> commands_to_send_;
   uint8_t send_retries_{0};
   uint8_t send_packets_{0};

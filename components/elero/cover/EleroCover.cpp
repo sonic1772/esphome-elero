@@ -93,7 +93,10 @@ void EleroCover::loop() {
   uint32_t intvl = this->poll_intvl_;
   uint32_t now = millis();
   if(this->current_operation != COVER_OPERATION_IDLE) {
-    if((now - ELERO_TIMEOUT_MOVEMENT) < this->movement_start_) // do not poll frequently for an extended period of time
+    // do not poll frequently for an extended period of time
+    // (written as a difference: "now - TIMEOUT" underflowed during the first two
+    // minutes after boot and disabled fast polling completely)
+    if((now - this->movement_start_) < ELERO_TIMEOUT_MOVEMENT)
       intvl = ELERO_POLL_INTERVAL_MOVING;
   }
 
@@ -104,8 +107,14 @@ void EleroCover::loop() {
 
   // Status request after a STOP/release from the original remote
   if((this->force_poll_at_ != 0) && ((int32_t)(now - this->force_poll_at_) >= 0)) {
-    this->force_poll_at_ = 0;
     this->commands_to_send_.push(this->command_check_);
+    if(this->force_poll_count_ > 1) {
+      this->force_poll_count_--;
+      this->force_poll_at_ = now + ELERO_REMOTE_STOP_POLL_DELAY * 2;
+    } else {
+      this->force_poll_count_ = 0;
+      this->force_poll_at_ = 0;
+    }
   }
 
   this->handle_commands(now);
@@ -203,6 +212,7 @@ void EleroCover::handle_remote_command(uint8_t cmd) {
     // here; ask the motor for its state shortly afterwards and let the reply
     // (stopped / moving) decide.
     this->force_poll_at_ = millis() + ELERO_REMOTE_STOP_POLL_DELAY;
+    this->force_poll_count_ = 2;  // ask twice in case a reply gets lost
   } else if((cmd == this->command_intermediate_) && (this->intermediate_position_ >= 0.0f)) {
     this->start_special_movement(this->to_raw_(this->intermediate_position_));
   } else if((cmd == this->command_tilt_) && (this->ventilation_position_ >= 0.0f)) {
