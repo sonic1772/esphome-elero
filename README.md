@@ -148,8 +148,9 @@ This fork adds the following on top of the original component:
 
 * **Tracking of the original remote:** If a command from the remote that is
   configured as `remote_address` is received (the handheld remote you sniffed),
-  the cover now tracks it: UP/DOWN start the position estimation, STOP stops it
-  at the current position. Previously only the blind's status replies were
+  the cover now tracks it: UP/DOWN start the position estimation. On STOP the
+  blind is asked for its state right away and its reply (stopped/moving) decides,
+  because some remotes (e.g. MonoTel 868) also send 0x10 when UP/DOWN is released. Previously only the blind's status replies were
   evaluated, so a STOP from the remote was missed.
 * **Fast status polling also for movements started by the remote**, and the
   position no longer jumps when such a movement starts.

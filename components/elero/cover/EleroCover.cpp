@@ -102,6 +102,12 @@ void EleroCover::loop() {
     this->last_poll_ = now - this->poll_offset_;
   }
 
+  // Status request after a STOP/release from the original remote
+  if((this->force_poll_at_ != 0) && ((int32_t)(now - this->force_poll_at_) >= 0)) {
+    this->force_poll_at_ = 0;
+    this->commands_to_send_.push(this->command_check_);
+  }
+
   this->handle_commands(now);
 
   if((this->current_operation != COVER_OPERATION_IDLE) && this->has_durations_()) {
@@ -192,12 +198,11 @@ void EleroCover::handle_remote_command(uint8_t cmd) {
     this->special_target_ = -1.0f;
     this->track_movement(COVER_OPERATION_CLOSING, COVER_CLOSED);
   } else if(cmd == this->command_stop_) {
-    this->special_target_ = -1.0f;
-    if(this->current_operation != COVER_OPERATION_IDLE) {
-      this->recompute_position();
-      this->target_position_ = COVER_OPEN;
-      this->set_idle_and_publish();
-    }
+    // Careful: some remotes (e.g. MonoTel 868) also send 0x10 when an UP/DOWN
+    // button is released - the motor keeps moving then. So do not stop tracking
+    // here; ask the motor for its state shortly afterwards and let the reply
+    // (stopped / moving) decide.
+    this->force_poll_at_ = millis() + ELERO_REMOTE_STOP_POLL_DELAY;
   } else if((cmd == this->command_intermediate_) && (this->intermediate_position_ >= 0.0f)) {
     this->start_special_movement(this->to_raw_(this->intermediate_position_));
   } else if((cmd == this->command_tilt_) && (this->ventilation_position_ >= 0.0f)) {
