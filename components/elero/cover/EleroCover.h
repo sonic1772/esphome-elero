@@ -97,6 +97,7 @@ class EleroCover : public cover::Cover, public Component {
   // published and may be mapped (see lamella_duration)
   float raw_position_{0.0f};
   uint32_t lamella_duration_{0};
+  uint32_t end_reached_time_{0};
   std::queue<uint8_t> commands_to_send_;
   uint8_t send_retries_{0};
   uint8_t send_packets_{0};

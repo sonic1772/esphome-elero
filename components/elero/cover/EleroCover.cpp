@@ -126,6 +126,22 @@ void EleroCover::loop() {
       return;
     }
 
+    // End position reached by time: the motor stops by itself. Do not wait for
+    // its status reply (which can take a long time) - assume idle after a grace period.
+    bool at_end = ((this->current_operation == COVER_OPERATION_OPENING) && (this->raw_position_ >= 1.0f)) ||
+                  ((this->current_operation == COVER_OPERATION_CLOSING) && (this->raw_position_ <= 0.0f));
+    if(at_end) {
+      if(this->end_reached_time_ == 0) {
+        this->end_reached_time_ = now;
+      } else if((now - this->end_reached_time_) > ELERO_END_POSITION_GRACE) {
+        this->end_reached_time_ = 0;
+        this->set_idle_and_publish();
+        return;
+      }
+    } else {
+      this->end_reached_time_ = 0;
+    }
+
     // Publish position every second
     if(now - this->last_publish_ > 1000) {
       this->publish_(false);
