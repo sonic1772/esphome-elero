@@ -35,6 +35,7 @@ class EleroCover : public cover::Cover, public Component {
   void set_command_intermediate(uint8_t cmd) { this->command_intermediate_ = cmd; }
   void set_intermediate_position(float pos) { this->intermediate_position_ = pos; }
   void set_ventilation_position(float pos) { this->ventilation_position_ = pos; }
+  void set_lamella_duration(uint32_t dur) { this->lamella_duration_ = dur; }
   void set_poll_offset(uint32_t offset) { this->poll_offset_ = offset; }
   void set_close_duration(uint32_t dur) { this->close_duration_ = dur; }
   void set_open_duration(uint32_t dur) { this->open_duration_ = dur; }
@@ -59,6 +60,12 @@ class EleroCover : public cover::Cover, public Component {
   void track_movement(cover::CoverOperation op, float target);
   void start_special_movement(float target);
   void set_idle_and_publish();
+  bool has_durations_();
+  float lamella_raw_();
+  float to_display_(float raw);
+  float to_raw_(float display);
+  void publish_(bool save = true);
+  bool try_special_position_(float display_target);
 
   t_elero_command command_ = {
     .counter = 1,
@@ -81,11 +88,15 @@ class EleroCover : public cover::Cover, public Component {
   uint8_t command_stop_{0x10};
   uint8_t command_tilt_{0x24};
   uint8_t command_intermediate_{0x44};
-  // Positions stored in the motor, < 0 = not configured
+  // Positions stored in the motor as shown in Home Assistant, < 0 = not configured
   float intermediate_position_{-1.0f};
   float ventilation_position_{-1.0f};
-  // Target of a movement the motor stops by itself (special position), < 0 = none
+  // Raw target of a movement the motor stops by itself (special position), < 0 = none
   float special_target_{-1.0f};
+  // Travel-time based position (0 = closed, 1 = open). `position` is what is
+  // published and may be mapped (see lamella_duration)
+  float raw_position_{0.0f};
+  uint32_t lamella_duration_{0};
   std::queue<uint8_t> commands_to_send_;
   uint8_t send_retries_{0};
   uint8_t send_packets_{0};

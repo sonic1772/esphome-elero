@@ -25,6 +25,7 @@ CONF_SUPPORTS_TILT = "supports_tilt"
 CONF_COMMAND_INTERMEDIATE = "command_intermediate"
 CONF_INTERMEDIATE_POSITION = "intermediate_position"
 CONF_VENTILATION_POSITION = "ventilation_position"
+CONF_LAMELLA_DURATION = "lamella_duration"
 
 EleroCover = elero_ns.class_("EleroCover", cover.Cover, cg.Component)
 
@@ -56,6 +57,7 @@ CONFIG_SCHEMA = cover.cover_schema(EleroCover).extend(
         cv.Optional(CONF_COMMAND_INTERMEDIATE, default=0x44): cv.hex_int_range(min=0x0, max=0xff),
         cv.Optional(CONF_INTERMEDIATE_POSITION): cv.percentage,
         cv.Optional(CONF_VENTILATION_POSITION): cv.percentage,
+        cv.Optional(CONF_LAMELLA_DURATION, default="0s"): cv.positive_time_period_milliseconds,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -84,6 +86,7 @@ async def to_code(config):
     cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
     cg.add(var.set_supports_tilt(config[CONF_SUPPORTS_TILT]))
     cg.add(var.set_command_intermediate(config[CONF_COMMAND_INTERMEDIATE]))
+    cg.add(var.set_lamella_duration(config[CONF_LAMELLA_DURATION]))
     if CONF_INTERMEDIATE_POSITION in config:
         cg.add(var.set_intermediate_position(config[CONF_INTERMEDIATE_POSITION]))
     if CONF_VENTILATION_POSITION in config:

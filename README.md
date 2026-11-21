@@ -166,8 +166,9 @@ cover:
     # ...
     open_duration: 30s
     close_duration: 28s
-    intermediate_position: 62%   # where the motor's intermediate position is
-    ventilation_position: 19%    # where the motor's ventilation position is
+    lamella_duration: 5s         # optional, see below
+    intermediate_position: 50%   # where the motor's intermediate position is (as shown in HA)
+    ventilation_position: 1%     # where the motor's ventilation position is (as shown in HA)
     command_intermediate: 0x44   # default
 
 button:
@@ -184,3 +185,13 @@ button:
   When these positions are configured, the cover also tracks double-taps on the
   original remote and ends up at the configured position, without sending a
   stop command (the motor stops by itself).
+
+* **Lamella phase (`lamella_duration`):** Time the blind needs at the bottom to
+  close the slats after sitting on the sill. With this option the published
+  position becomes: 0 % = fully closed, 1 % = sitting on the sill with open
+  slats, 1-100 % spread evenly over the remaining travel. Without it, the
+  position is the plain travel-time fraction as before.
+* **Motor positions via the position slider:** Setting the position to exactly
+  `intermediate_position` (coming from above) or `ventilation_position`
+  (coming from below) sends the motor's own command instead of a timed
+  movement, so the blind stops exactly where it was taught in.

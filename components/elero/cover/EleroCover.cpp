@@ -9,8 +9,19 @@ using namespace esphome::cover;
 
 static const char *const TAG = "elero.cover";
 
+// Position shown in Home Assistant while the blind sits on the sill with the
+// slats still open (only used when lamella_duration is configured)
+static const float LAMELLA_OPEN_POSITION = 0.01f;
+static const float POSITION_EPSILON = 0.005f;
+
 void EleroCover::dump_config() {
   LOG_COVER("", "Elero Cover", this);
+  if(this->lamella_duration_ > 0)
+    ESP_LOGCONFIG(TAG, "  Lamella duration: %u ms", this->lamella_duration_);
+  if(this->intermediate_position_ >= 0.0f)
+    ESP_LOGCONFIG(TAG, "  Intermediate position: %.0f%%", this->intermediate_position_ * 100.0f);
+  if(this->ventilation_position_ >= 0.0f)
+    ESP_LOGCONFIG(TAG, "  Ventilation position: %.0f%%", this->ventilation_position_ * 100.0f);
 }
 
 void EleroCover::setup() {
@@ -19,10 +30,64 @@ void EleroCover::setup() {
   if (restore.has_value()) {
     restore->apply(this);
   } else {
-    if((this->open_duration_ > 0) && (this->close_duration_ > 0))
+    if(this->has_durations_())
       this->position = 0.5f;
   }
+  this->raw_position_ = this->to_raw_(this->position);
 }
+
+bool EleroCover::has_durations_() {
+  return (this->open_duration_ > 0) && (this->close_duration_ > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Position mapping
+//
+// raw_position_ is the travel-time based position (0 = closed, 1 = open).
+// The position published to Home Assistant can differ when lamella_duration
+// is set: 0 % = fully closed, 1 % = sitting on the sill with open slats,
+// 1..100 % = evenly spread over the remaining travel.
+// ---------------------------------------------------------------------------
+float EleroCover::lamella_raw_() {
+  if((this->lamella_duration_ == 0) || (this->close_duration_ == 0))
+    return 0.0f;
+  float rs = (float) this->lamella_duration_ / (float) this->close_duration_;
+  return clamp(rs, 0.0f, 0.5f);
+}
+
+float EleroCover::to_display_(float raw) {
+  float rs = this->lamella_raw_();
+  if(rs <= 0.0f)
+    return raw;
+  if(raw <= 0.001f)
+    return COVER_CLOSED;
+  if(raw >= 0.999f)
+    return COVER_OPEN;
+  if(raw <= rs)
+    return LAMELLA_OPEN_POSITION;
+  return LAMELLA_OPEN_POSITION + (raw - rs) / (1.0f - rs) * (1.0f - LAMELLA_OPEN_POSITION);
+}
+
+float EleroCover::to_raw_(float display) {
+  float rs = this->lamella_raw_();
+  if(rs <= 0.0f)
+    return display;
+  if(display <= 0.0f)
+    return 0.0f;
+  if(display >= 1.0f)
+    return 1.0f;
+  if(display <= LAMELLA_OPEN_POSITION)
+    return rs;
+  return rs + (display - LAMELLA_OPEN_POSITION) / (1.0f - LAMELLA_OPEN_POSITION) * (1.0f - rs);
+}
+
+void EleroCover::publish_(bool save) {
+  this->position = this->to_display_(this->raw_position_);
+  this->publish_state(save);
+  this->last_publish_ = millis();
+}
+
+// ---------------------------------------------------------------------------
 
 void EleroCover::loop() {
   uint32_t intvl = this->poll_intvl_;
@@ -39,15 +104,15 @@ void EleroCover::loop() {
 
   this->handle_commands(now);
 
-  if((this->current_operation != COVER_OPERATION_IDLE) && (this->open_duration_ > 0) && (this->close_duration_ > 0)) {
+  if((this->current_operation != COVER_OPERATION_IDLE) && this->has_durations_()) {
     this->recompute_position();
     if(this->special_target_ >= 0.0f) {
       // Movement to a position stored in the motor: the motor stops by itself,
       // so we must not send a stop command - just stop tracking at the target.
-      bool reached = ((this->current_operation == COVER_OPERATION_OPENING) && (this->position >= this->special_target_)) ||
-                     ((this->current_operation == COVER_OPERATION_CLOSING) && (this->position <= this->special_target_));
+      bool reached = ((this->current_operation == COVER_OPERATION_OPENING) && (this->raw_position_ >= this->special_target_)) ||
+                     ((this->current_operation == COVER_OPERATION_CLOSING) && (this->raw_position_ <= this->special_target_));
       if(reached) {
-        this->position = this->special_target_;
+        this->raw_position_ = this->special_target_;
         this->special_target_ = -1.0f;
         this->target_position_ = COVER_OPEN;
         this->set_idle_and_publish();
@@ -63,16 +128,14 @@ void EleroCover::loop() {
 
     // Publish position every second
     if(now - this->last_publish_ > 1000) {
-      this->publish_state(false);
-      this->last_publish_ = now;
+      this->publish_(false);
     }
   }
 }
 
 void EleroCover::set_idle_and_publish() {
   this->current_operation = COVER_OPERATION_IDLE;
-  this->publish_state();
-  this->last_publish_ = millis();
+  this->publish_();
 }
 
 void EleroCover::track_movement(CoverOperation op, float target) {
@@ -89,20 +152,19 @@ void EleroCover::track_movement(CoverOperation op, float target) {
     this->last_operation_ = op;
     this->tilt = 0.0;
   }
-  this->publish_state();
-  this->last_publish_ = now;
+  this->publish_();
 }
 
-void EleroCover::start_special_movement(float target) {
-  if(fabsf(target - this->position) < 0.01f) {
+void EleroCover::start_special_movement(float raw_target) {
+  if(fabsf(raw_target - this->raw_position_) < 0.01f) {
     // Already there (as far as we know)
     this->special_target_ = -1.0f;
-    this->position = target;
+    this->raw_position_ = raw_target;
     this->set_idle_and_publish();
     return;
   }
-  this->special_target_ = target;
-  this->track_movement(target > this->position ? COVER_OPERATION_OPENING : COVER_OPERATION_CLOSING, target);
+  this->special_target_ = raw_target;
+  this->track_movement(raw_target > this->raw_position_ ? COVER_OPERATION_OPENING : COVER_OPERATION_CLOSING, raw_target);
 }
 
 void EleroCover::handle_remote_command(uint8_t cmd) {
@@ -121,22 +183,22 @@ void EleroCover::handle_remote_command(uint8_t cmd) {
       this->set_idle_and_publish();
     }
   } else if((cmd == this->command_intermediate_) && (this->intermediate_position_ >= 0.0f)) {
-    this->start_special_movement(this->intermediate_position_);
+    this->start_special_movement(this->to_raw_(this->intermediate_position_));
   } else if((cmd == this->command_tilt_) && (this->ventilation_position_ >= 0.0f)) {
-    this->start_special_movement(this->ventilation_position_);
+    this->start_special_movement(this->to_raw_(this->ventilation_position_));
   }
 }
 
 void EleroCover::move_to_intermediate() {
   this->commands_to_send_.push(this->command_intermediate_);
   if(this->intermediate_position_ >= 0.0f)
-    this->start_special_movement(this->intermediate_position_);
+    this->start_special_movement(this->to_raw_(this->intermediate_position_));
 }
 
 void EleroCover::move_to_ventilation() {
   this->commands_to_send_.push(this->command_tilt_);
   if(this->ventilation_position_ >= 0.0f)
-    this->start_special_movement(this->ventilation_position_);
+    this->start_special_movement(this->to_raw_(this->ventilation_position_));
 }
 
 bool EleroCover::is_at_target() {
@@ -147,9 +209,9 @@ bool EleroCover::is_at_target() {
 
   switch (this->current_operation) {
     case COVER_OPERATION_OPENING:
-      return this->position >= this->target_position_;
+      return this->raw_position_ >= this->target_position_;
     case COVER_OPERATION_CLOSING:
-      return this->position <= this->target_position_;
+      return this->raw_position_ <= this->target_position_;
     case COVER_OPERATION_IDLE:
     default:
       return true;
@@ -187,10 +249,7 @@ float EleroCover::get_setup_priority() const { return setup_priority::DATA; }
 cover::CoverTraits EleroCover::get_traits() {
   auto traits = cover::CoverTraits();
   traits.set_supports_stop(true);
-  if((this->open_duration_ > 0) && (this->close_duration_ > 0))
-    traits.set_supports_position(true);
-  else
-    traits.set_supports_position(false);
+  traits.set_supports_position(this->has_durations_());
   traits.set_supports_toggle(true);
   traits.set_is_assumed_state(true);
   traits.set_supports_tilt(this->supports_tilt_);
@@ -201,7 +260,7 @@ void EleroCover::set_rx_state(uint8_t state) {
   ESP_LOGV(TAG, "Got state: 0x%02x for blind 0x%06x", state, this->command_.blind_addr);
   // Bring the estimated position up to date first
   this->recompute_position();
-  float pos = this->position;
+  float pos = this->raw_position_;
   float current_tilt = this->tilt;
   CoverOperation op = this->current_operation;
   bool end_position = false;
@@ -248,8 +307,8 @@ void EleroCover::set_rx_state(uint8_t state) {
   }
 
   bool movement_started = (op != COVER_OPERATION_IDLE) && (op != this->current_operation);
-  if((pos != this->position) || (op != this->current_operation) || (current_tilt != this->tilt)) {
-    this->position = pos;
+  if((pos != this->raw_position_) || (op != this->current_operation) || (current_tilt != this->tilt)) {
+    this->raw_position_ = pos;
     this->tilt = current_tilt;
     this->current_operation = op;
     if(movement_started) {
@@ -262,8 +321,7 @@ void EleroCover::set_rx_state(uint8_t state) {
       if(this->special_target_ < 0.0f)
         this->target_position_ = (op == COVER_OPERATION_OPENING) ? COVER_OPEN : COVER_CLOSED;
     }
-    this->publish_state();
-    this->last_publish_ = millis();
+    this->publish_();
   }
 }
 
@@ -274,14 +332,43 @@ void EleroCover::increase_counter() {
     this->command_.counter += 1;
 }
 
+bool EleroCover::try_special_position_(float display_target) {
+  // Use the positions stored in the motor when they are requested. The motor
+  // reaches the intermediate position coming from above and the ventilation
+  // position coming from below (that is how they are taught in), so only use
+  // them in that direction - otherwise fall back to the time-based movement.
+  if((this->intermediate_position_ >= 0.0f) &&
+     (fabsf(display_target - this->intermediate_position_) < POSITION_EPSILON)) {
+    float raw = this->to_raw_(this->intermediate_position_);
+    if(this->raw_position_ > raw + 0.01f) {
+      this->move_to_intermediate();
+      return true;
+    }
+  }
+  if((this->ventilation_position_ >= 0.0f) &&
+     (fabsf(display_target - this->ventilation_position_) < POSITION_EPSILON)) {
+    float raw = this->to_raw_(this->ventilation_position_);
+    if(this->raw_position_ < raw - 0.01f) {
+      this->move_to_ventilation();
+      return true;
+    }
+  }
+  return false;
+}
+
 void EleroCover::control(const cover::CoverCall &call) {
   if (call.get_stop()) {
     this->start_movement(COVER_OPERATION_IDLE);
   }
   if (call.get_position().has_value()) {
-    auto pos = *call.get_position();
+    auto display_pos = *call.get_position();
+    if(this->has_durations_() && (this->current_operation == COVER_OPERATION_IDLE) &&
+       this->try_special_position_(display_pos)) {
+      return;
+    }
+    auto pos = this->to_raw_(display_pos);
     this->target_position_ = pos;
-    if((pos > this->position) || (pos == COVER_OPEN)) {
+    if((pos > this->raw_position_) || (pos == COVER_OPEN)) {
       this->start_movement(COVER_OPERATION_OPENING);
     } else {
       this->start_movement(COVER_OPERATION_CLOSING);
@@ -300,7 +387,7 @@ void EleroCover::control(const cover::CoverCall &call) {
     if(this->current_operation != COVER_OPERATION_IDLE) {
       this->start_movement(COVER_OPERATION_IDLE);
     } else {
-      if(this->position == COVER_CLOSED || this->last_operation_ == COVER_OPERATION_CLOSING) {
+      if(this->raw_position_ == COVER_CLOSED || this->last_operation_ == COVER_OPERATION_CLOSING) {
         this->target_position_ = COVER_OPEN;
         this->start_movement(COVER_OPERATION_OPENING);
       } else {
@@ -339,18 +426,19 @@ void EleroCover::start_movement(CoverOperation dir) {
   if(dir == this->current_operation)
     return;
 
+  // Bring the position up to date before changing direction or stopping
+  this->recompute_position();
   this->current_operation = dir;
   this->movement_start_ = millis();
   this->last_recompute_time_ = millis();
-  this->publish_state();
+  this->publish_();
 }
 
 void EleroCover::recompute_position() {
   if(this->current_operation == COVER_OPERATION_IDLE)
     return;
-  if((this->open_duration_ == 0) || (this->close_duration_ == 0))
+  if(!this->has_durations_())
     return;
-
 
   float dir;
   float action_dur;
@@ -368,11 +456,10 @@ void EleroCover::recompute_position() {
   }
 
   const uint32_t now = millis();
-  this->position += dir * (now - this->last_recompute_time_) / action_dur;
-  this->position = clamp(this->position, 0.0f, 1.0f);
+  this->raw_position_ += dir * (now - this->last_recompute_time_) / action_dur;
+  this->raw_position_ = clamp(this->raw_position_, 0.0f, 1.0f);
 
   this->last_recompute_time_ = now;
-
 }
 
 } // namespace elero
