@@ -457,6 +457,13 @@ void Elero::interpret_msg() {
     if(search != this->address_to_cover_mapping_.end()) {
       search->second->set_rx_state(payload[6]);
     }
+  } else if((typ == 0x6a) || (typ == 0x69)) { // Command from a remote to a blind
+    // If it comes from the remote we impersonate (the original handheld remote),
+    // let the cover track the movement. command = payload[2]
+    auto search = this->address_to_cover_mapping_.find(dst);
+    if((search != this->address_to_cover_mapping_.end()) && (search->second->get_remote_address() == src)) {
+      search->second->handle_remote_command(payload[2]);
+    }
   }
 }
 

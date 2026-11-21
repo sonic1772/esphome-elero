@@ -32,21 +32,33 @@ class EleroCover : public cover::Cover, public Component {
   void set_command_stop(uint8_t cmd) { this->command_stop_ = cmd; }
   void set_command_check(uint8_t cmd) { this->command_check_ = cmd; }
   void set_command_tilt(uint8_t cmd) { this->command_tilt_ = cmd; }
+  void set_command_intermediate(uint8_t cmd) { this->command_intermediate_ = cmd; }
+  void set_intermediate_position(float pos) { this->intermediate_position_ = pos; }
+  void set_ventilation_position(float pos) { this->ventilation_position_ = pos; }
   void set_poll_offset(uint32_t offset) { this->poll_offset_ = offset; }
   void set_close_duration(uint32_t dur) { this->close_duration_ = dur; }
   void set_open_duration(uint32_t dur) { this->open_duration_ = dur; }
   void set_poll_interval(uint32_t intvl) { this->poll_intvl_ = intvl; }
   uint32_t get_blind_address() { return this->command_.blind_addr; }
+  uint32_t get_remote_address() { return this->command_.remote_addr; }
   void set_supports_tilt(bool tilt) { this->supports_tilt_ = tilt; }
   void set_rx_state(uint8_t state);
   void handle_commands(uint32_t now);
   void recompute_position();
   void start_movement(cover::CoverOperation op);
   bool is_at_target();
+  // Command seen on air from the original remote (same remote address as ours)
+  void handle_remote_command(uint8_t cmd);
+  // Drive to the positions stored in the motor (Zwischenposition / Lueftungsposition)
+  void move_to_intermediate();
+  void move_to_ventilation();
   
  protected:
   void control(const cover::CoverCall &call) override;
   void increase_counter();
+  void track_movement(cover::CoverOperation op, float target);
+  void start_special_movement(float target);
+  void set_idle_and_publish();
 
   t_elero_command command_ = {
     .counter = 1,
@@ -68,6 +80,12 @@ class EleroCover : public cover::Cover, public Component {
   uint8_t command_check_{0x00};
   uint8_t command_stop_{0x10};
   uint8_t command_tilt_{0x24};
+  uint8_t command_intermediate_{0x44};
+  // Positions stored in the motor, < 0 = not configured
+  float intermediate_position_{-1.0f};
+  float ventilation_position_{-1.0f};
+  // Target of a movement the motor stops by itself (special position), < 0 = none
+  float special_target_{-1.0f};
   std::queue<uint8_t> commands_to_send_;
   uint8_t send_retries_{0};
   uint8_t send_packets_{0};

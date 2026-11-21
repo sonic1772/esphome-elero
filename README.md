@@ -141,3 +141,46 @@ This project was tested on two different configurations:
 
   1. D1 Mini ESP32 + 433MHz CC1101 module. Bad range and limited reception, but generally working.
   2. WT32-ETH01 + 868MHz CC1101 module from a canibalized RWE Smart Home central. Very good range and excellent reception.
+
+## Fork additions (sonic1772)
+
+This fork adds the following on top of the original component:
+
+* **Tracking of the original remote:** If a command from the remote that is
+  configured as `remote_address` is received (the handheld remote you sniffed),
+  the cover now tracks it: UP/DOWN start the position estimation, STOP stops it
+  at the current position. Previously only the blind's status replies were
+  evaluated, so a STOP from the remote was missed.
+* **Fast status polling also for movements started by the remote**, and the
+  position no longer jumps when such a movement starts.
+* **Fix:** When a position target is reached, the new state (idle) is
+  published immediately. Before, Home Assistant could keep showing
+  "opening"/"closing".
+* **Positions stored in the motor** (intermediate position = double DOWN,
+  ventilation/tilt position = double UP):
+
+```yaml
+cover:
+  - platform: elero
+    id: my_blind
+    # ...
+    open_duration: 30s
+    close_duration: 28s
+    intermediate_position: 62%   # where the motor's intermediate position is
+    ventilation_position: 19%    # where the motor's ventilation position is
+    command_intermediate: 0x44   # default
+
+button:
+  - platform: template
+    name: "Intermediate position"
+    on_press:
+      - lambda: id(my_blind)->move_to_intermediate();
+  - platform: template
+    name: "Ventilation position"
+    on_press:
+      - lambda: id(my_blind)->move_to_ventilation();
+```
+
+  When these positions are configured, the cover also tracks double-taps on the
+  original remote and ends up at the configured position, without sending a
+  stop command (the motor stops by itself).

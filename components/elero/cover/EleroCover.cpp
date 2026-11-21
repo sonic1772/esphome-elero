@@ -1,5 +1,6 @@
 #include "EleroCover.h"
 #include "esphome/core/log.h"
+#include <cmath>
 
 namespace esphome {
 namespace elero {
@@ -40,10 +41,24 @@ void EleroCover::loop() {
 
   if((this->current_operation != COVER_OPERATION_IDLE) && (this->open_duration_ > 0) && (this->close_duration_ > 0)) {
     this->recompute_position();
-    if(this->is_at_target()) {
+    if(this->special_target_ >= 0.0f) {
+      // Movement to a position stored in the motor: the motor stops by itself,
+      // so we must not send a stop command - just stop tracking at the target.
+      bool reached = ((this->current_operation == COVER_OPERATION_OPENING) && (this->position >= this->special_target_)) ||
+                     ((this->current_operation == COVER_OPERATION_CLOSING) && (this->position <= this->special_target_));
+      if(reached) {
+        this->position = this->special_target_;
+        this->special_target_ = -1.0f;
+        this->target_position_ = COVER_OPEN;
+        this->set_idle_and_publish();
+        return;
+      }
+    } else if(this->is_at_target()) {
       this->commands_to_send_.push(this->command_stop_);
-      this->current_operation = COVER_OPERATION_IDLE;
       this->target_position_ = COVER_OPEN;
+      // Publish immediately, otherwise the cover stays "opening"/"closing" in HA
+      this->set_idle_and_publish();
+      return;
     }
 
     // Publish position every second
@@ -52,6 +67,76 @@ void EleroCover::loop() {
       this->last_publish_ = now;
     }
   }
+}
+
+void EleroCover::set_idle_and_publish() {
+  this->current_operation = COVER_OPERATION_IDLE;
+  this->publish_state();
+  this->last_publish_ = millis();
+}
+
+void EleroCover::track_movement(CoverOperation op, float target) {
+  this->target_position_ = target;
+  if(op == this->current_operation)
+    return;
+  // Bring the position up to date before changing direction
+  this->recompute_position();
+  this->current_operation = op;
+  const uint32_t now = millis();
+  this->movement_start_ = now;  // also enables fast status polling while moving
+  this->last_recompute_time_ = now;
+  if(op != COVER_OPERATION_IDLE) {
+    this->last_operation_ = op;
+    this->tilt = 0.0;
+  }
+  this->publish_state();
+  this->last_publish_ = now;
+}
+
+void EleroCover::start_special_movement(float target) {
+  if(fabsf(target - this->position) < 0.01f) {
+    // Already there (as far as we know)
+    this->special_target_ = -1.0f;
+    this->position = target;
+    this->set_idle_and_publish();
+    return;
+  }
+  this->special_target_ = target;
+  this->track_movement(target > this->position ? COVER_OPERATION_OPENING : COVER_OPERATION_CLOSING, target);
+}
+
+void EleroCover::handle_remote_command(uint8_t cmd) {
+  ESP_LOGD(TAG, "Remote command 0x%02x for blind 0x%06x", cmd, this->command_.blind_addr);
+  if(cmd == this->command_up_) {
+    this->special_target_ = -1.0f;
+    this->track_movement(COVER_OPERATION_OPENING, COVER_OPEN);
+  } else if(cmd == this->command_down_) {
+    this->special_target_ = -1.0f;
+    this->track_movement(COVER_OPERATION_CLOSING, COVER_CLOSED);
+  } else if(cmd == this->command_stop_) {
+    this->special_target_ = -1.0f;
+    if(this->current_operation != COVER_OPERATION_IDLE) {
+      this->recompute_position();
+      this->target_position_ = COVER_OPEN;
+      this->set_idle_and_publish();
+    }
+  } else if((cmd == this->command_intermediate_) && (this->intermediate_position_ >= 0.0f)) {
+    this->start_special_movement(this->intermediate_position_);
+  } else if((cmd == this->command_tilt_) && (this->ventilation_position_ >= 0.0f)) {
+    this->start_special_movement(this->ventilation_position_);
+  }
+}
+
+void EleroCover::move_to_intermediate() {
+  this->commands_to_send_.push(this->command_intermediate_);
+  if(this->intermediate_position_ >= 0.0f)
+    this->start_special_movement(this->intermediate_position_);
+}
+
+void EleroCover::move_to_ventilation() {
+  this->commands_to_send_.push(this->command_tilt_);
+  if(this->ventilation_position_ >= 0.0f)
+    this->start_special_movement(this->ventilation_position_);
 }
 
 bool EleroCover::is_at_target() {
@@ -113,21 +198,26 @@ cover::CoverTraits EleroCover::get_traits() {
 }
 
 void EleroCover::set_rx_state(uint8_t state) {
-  ESP_LOGV(TAG, "Got state: 0x%02x for blind 0x%02x", state, this->command_.blind_addr);
+  ESP_LOGV(TAG, "Got state: 0x%02x for blind 0x%06x", state, this->command_.blind_addr);
+  // Bring the estimated position up to date first
+  this->recompute_position();
   float pos = this->position;
   float current_tilt = this->tilt;
   CoverOperation op = this->current_operation;
+  bool end_position = false;
 
   switch(state) {
   case ELERO_STATE_TOP:
     pos = COVER_OPEN;
     op = COVER_OPERATION_IDLE;
     current_tilt = 0.0;
+    end_position = true;
     break;
   case ELERO_STATE_BOTTOM:
     pos = COVER_CLOSED;
     op = COVER_OPERATION_IDLE;
     current_tilt = 0.0;
+    end_position = true;
     break;
   case ELERO_STATE_START_MOVING_UP:
   case ELERO_STATE_MOVING_UP:
@@ -144,19 +234,36 @@ void EleroCover::set_rx_state(uint8_t state) {
     current_tilt = 1.0;
     break;
   case ELERO_STATE_STOPPED:
-    op = COVER_OPERATION_IDLE;
-    current_tilt = 0.0;
-    break;
+  case ELERO_STATE_INTERMEDIATE:
   default:
     op = COVER_OPERATION_IDLE;
     current_tilt = 0.0;
   }
 
+  if(op == COVER_OPERATION_IDLE) {
+    // The motor stopped at a position stored in it -> we know exactly where it is
+    if(!end_position && (this->special_target_ >= 0.0f))
+      pos = this->special_target_;
+    this->special_target_ = -1.0f;
+  }
+
+  bool movement_started = (op != COVER_OPERATION_IDLE) && (op != this->current_operation);
   if((pos != this->position) || (op != this->current_operation) || (current_tilt != this->tilt)) {
     this->position = pos;
     this->tilt = current_tilt;
     this->current_operation = op;
+    if(movement_started) {
+      // Movement started by someone else (e.g. the original remote): start tracking now,
+      // otherwise the position would jump and status polling would stay slow
+      const uint32_t now = millis();
+      this->movement_start_ = now;
+      this->last_recompute_time_ = now;
+      this->last_operation_ = op;
+      if(this->special_target_ < 0.0f)
+        this->target_position_ = (op == COVER_OPERATION_OPENING) ? COVER_OPEN : COVER_CLOSED;
+    }
     this->publish_state();
+    this->last_publish_ = millis();
   }
 }
 
@@ -208,6 +315,7 @@ void EleroCover::control(const cover::CoverCall &call) {
 // handle_commands function to only publish a new state
 // if at least the transmission was successful
 void EleroCover::start_movement(CoverOperation dir) {
+  this->special_target_ = -1.0f;
   switch(dir) {
     case COVER_OPERATION_OPENING:
       ESP_LOGV(TAG, "Sending OPEN command");
@@ -239,6 +347,8 @@ void EleroCover::start_movement(CoverOperation dir) {
 
 void EleroCover::recompute_position() {
   if(this->current_operation == COVER_OPERATION_IDLE)
+    return;
+  if((this->open_duration_ == 0) || (this->close_duration_ == 0))
     return;
 
 
